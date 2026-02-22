@@ -1,0 +1,53 @@
+##############################################################################
+# Pre-commit hooks for CI/CD security
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+##############################################################################
+
+repos:
+  # ✅ Secret detection — catch secrets before they hit the repo
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        # Initialize baseline with: detect-secrets scan > .secrets.baseline
+
+  # ✅ TruffleHog secret scanning (alternative / additional layer)
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.82.0
+    hooks:
+      - id: trufflehog
+        name: TruffleHog secret scan
+        entry: trufflehog git file://. --only-verified --fail
+        language: system
+        pass_filenames: false
+
+  # ✅ Prevent committing to main branch directly
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: no-commit-to-branch
+        args: [--branch, main, --branch, master]
+      - id: check-added-large-files
+        args: ['--maxkb=1024']
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: detect-private-key     # Catch private keys
+      - id: check-case-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  # ✅ Dockerfile linting
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.0
+    hooks:
+      - id: hadolint
+        args: [--failure-threshold, error]
+
+  # ✅ YAML security checks
+  - repo: https://github.com/jumanjihouse/pre-commit-hook-yamlfmt
+    rev: 0.2.3
+    hooks:
+      - id: yamlfmt

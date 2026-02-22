@@ -1,0 +1,321 @@
+##############################################################################
+# Secure CI/CD Pipeline — Complete GitHub Actions Workflow
+# Implements all 10 CI/CD security best practices from the tutorial.
+# Adapt to your stack (replace Python/ECR with your language/registry).
+##############################################################################
+
+name: 🔒 Secure CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+# ✅ PRACTICE #8: Deny ALL permissions at workflow level
+# Each job grants only what it needs.
+permissions: {}
+
+env:
+  REGISTRY: ${{ secrets.ECR_REGISTRY }}         # e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com
+  IMAGE_NAME: myapp
+  AWS_REGION: us-east-1
+
+##############################################################################
+# JOB 1: Secrets Detection (Practice #1)
+##############################################################################
+jobs:
+  secrets-scan:
+    name: 🔍 Secrets Detection
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read      # Read-only: scan the codebase
+    steps:
+      - name: Checkout code
+        # ✅ PRACTICE #4: Pin action to immutable SHA
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          fetch-depth: 0  # Full history needed for incremental scan
+
+      - name: Detect secrets with TruffleHog
+        # ✅ PRACTICE #1: Scan for secrets on every PR
+        uses: trufflesecurity/trufflehog@38a4d2a4c4e4a0c4e5678af7a0cf0bfc17b9484e  # v3.82.0
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified
+
+##############################################################################
+# JOB 2: SAST Analysis (Practice #7)
+##############################################################################
+  sast:
+    name: 🔬 SAST — CodeQL + Semgrep
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # Upload SARIF to GitHub Security tab
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@dd746615b3b9d728a6a37ca2045b68ca76d4841a  # v3
+        with:
+          languages: python, javascript
+          queries: security-extended,security-and-quality
+
+      - name: Auto-build for CodeQL
+        uses: github/codeql-action/autobuild@dd746615b3b9d728a6a37ca2045b68ca76d4841a  # v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@dd746615b3b9d728a6a37ca2045b68ca76d4841a  # v3
+        with:
+          category: /language:python
+
+      - name: Semgrep SAST scan
+        uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d  # v1
+        with:
+          config: >-
+            p/owasp-top-ten
+            p/python
+            p/secrets
+
+##############################################################################
+# JOB 3: Dependency Vulnerability Scan + SBOM (Practice #3)
+##############################################################################
+  dependency-scan:
+    name: 📦 Dependency Scan + SBOM
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # ✅ PRACTICE #3: Scan filesystem for known CVEs
+      - name: Trivy filesystem vulnerability scan
+        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8  # v0.29.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-fs.sarif
+          severity: CRITICAL,HIGH
+          exit-code: 1          # ✅ Fail pipeline on critical vulns!
+          scanners: vuln,secret
+
+      - name: Upload Trivy filesystem results
+        uses: github/codeql-action/upload-sarif@dd746615b3b9d728a6a37ca2045b68ca76d4841a  # v3
+        if: always()   # Upload even if scan failed
+        with:
+          sarif_file: trivy-fs.sarif
+
+      # ✅ PRACTICE #3: Generate Software Bill of Materials
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@7ccf588e3cf3cc2611714c2eeae48550fbc17552  # v0
+        with:
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Upload SBOM as artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.spdx.json
+          retention-days: 90
+
+##############################################################################
+# JOB 4: Build + Container Scan + Sign (Practices #2, #5, #6)
+##############################################################################
+  build-scan-sign:
+    name: 🏗️ Build → Scan → Sign
+    runs-on: ubuntu-latest
+    needs: [secrets-scan, sast, dependency-scan]   # Only run if all checks pass
+    permissions:
+      contents: read
+      id-token: write     # ✅ PRACTICE #2: OIDC token for keyless auth
+      packages: write     # Push to registry
+      security-events: write
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # ✅ PRACTICE #2: Authenticate to AWS using OIDC — no stored credentials!
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502  # v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsRole
+          aws-region: ${{ env.AWS_REGION }}
+          # Short-lived credentials — automatically expires after job
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076  # v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2  # v3
+
+      # ✅ PRACTICE #5: Build with SBOM + provenance metadata
+      - name: Build and push container image
+        id: build
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4  # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.login-ecr.outputs.registry }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true    # ✅ SLSA provenance attestation
+          sbom: true          # ✅ SBOM embedded in image
+
+      # ✅ PRACTICE #5: Scan built container image for vulnerabilities
+      - name: Trivy container image scan
+        uses: aquasecurity/trivy-action@6e7b7d1fd3e4fef0c5fa8cce1229c54b2c9bd0d8  # v0.29.0
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH
+          exit-code: 1
+          scanners: vuln,secret,misconfig   # Check for vulns, secrets, and misconfig
+
+      - name: Upload image scan results
+        uses: github/codeql-action/upload-sarif@dd746615b3b9d728a6a37ca2045b68ca76d4841a  # v3
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+
+      # ✅ PRACTICE #6: Sign container image with Cosign (keyless)
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da  # v3
+
+      - name: Sign container image
+        # Cosign uses the GitHub OIDC token to get a short-lived cert from Fulcio
+        # The signature is logged in Rekor transparency log — no key management!
+        run: |
+          cosign sign --yes \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        env:
+          COSIGN_EXPERIMENTAL: 1
+
+      # ✅ PRACTICE #6: Attach SBOM as signed attestation
+      - name: Attach SBOM attestation to image
+        run: |
+          cosign attest --yes \
+            --predicate sbom.spdx.json \
+            --type spdxjson \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        env:
+          COSIGN_EXPERIMENTAL: 1
+
+##############################################################################
+# JOB 5: Deploy to Staging (Practice #2, #6, #8)
+##############################################################################
+  deploy-staging:
+    name: 🚀 Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-scan-sign
+    environment: staging    # ✅ GitHub Environment — enables required reviewers + deployment tracking
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da  # v3
+
+      # ✅ PRACTICE #6: ALWAYS verify signature before deploying
+      - name: Verify container signature
+        run: |
+          cosign verify \
+            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.*" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            ${{ needs.build-scan-sign.outputs.image-ref }}@${{ needs.build-scan-sign.outputs.image-digest }}
+          echo "✅ Signature verified — safe to deploy to staging"
+
+      # ✅ PRACTICE #2: OIDC for staging deployment
+      - name: Configure AWS credentials via OIDC (staging)
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502  # v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/StagingDeployRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS Staging
+        run: |
+          aws ecs update-service \
+            --cluster staging-cluster \
+            --service ${{ env.IMAGE_NAME }}-service \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+##############################################################################
+# JOB 6: DAST against Staging (Practice #7)
+##############################################################################
+  dast:
+    name: 🌐 DAST — OWASP ZAP
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    permissions:
+      contents: read
+      issues: write     # ZAP action creates GitHub issues for findings
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      # ✅ PRACTICE #7: Dynamic scan against running staging environment
+      - name: OWASP ZAP API Scan
+        uses: zaproxy/action-api-scan@v0.7.0
+        with:
+          target: https://staging.myapp.example.com
+          format: openapi
+          fail_action: true
+          rules_file_name: .zap/rules.tsv
+          cmd_options: '-a'
+
+##############################################################################
+# JOB 7: Deploy to Production (requires manual approval)
+##############################################################################
+  deploy-production:
+    name: 🏭 Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, dast]
+    # ✅ PRACTICE #9: Production environment requires manual reviewer approval
+    environment: production
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da  # v3
+
+      # ✅ PRACTICE #6: Re-verify signature before production deployment
+      - name: Verify container signature (production gate)
+        run: |
+          cosign verify \
+            --certificate-identity-regexp="https://github.com/${{ github.repository }}/.*" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            ${{ needs.build-scan-sign.outputs.image-ref }}@${{ needs.build-scan-sign.outputs.image-digest }}
+          echo "✅ Signature verified — safe to deploy to production"
+
+      - name: Configure AWS credentials via OIDC (production)
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502  # v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/ProductionDeployRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS Production
+        run: |
+          aws ecs update-service \
+            --cluster production-cluster \
+            --service ${{ env.IMAGE_NAME }}-service \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
