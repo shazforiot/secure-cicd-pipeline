@@ -39,7 +39,7 @@ jobs:
 
       - name: Detect secrets with TruffleHog
         # ✅ PRACTICE #1: Scan for secrets on every PR
-        uses: trufflesecurity/trufflehog@38a4d2a4c4e4a0c4e5678af7a0cf0bfc17b9484e  # v3.82.0
+        uses: trufflesecurity/trufflehog@7c0734f987ad0bb30ee8da210773b800ee2016d3  # v3.93.4
         with:
           path: ./
           base: ${{ github.event.repository.default_branch }}
@@ -62,7 +62,10 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@dd746615b3b9d728a6a37ca2045b68ca76d4841a  # v3
         with:
-          languages: python, javascript
+          # No Python source in this demo repo — using 'javascript' scans the
+          # GitHub Actions workflow YAML files (CI/CD config security analysis).
+          # In a real Python project, add 'python' back here.
+          languages: javascript
           queries: security-extended,security-and-quality
 
       - name: Auto-build for CodeQL
@@ -71,14 +74,13 @@ jobs:
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@dd746615b3b9d728a6a37ca2045b68ca76d4841a  # v3
         with:
-          category: /language:python
+          category: /language:javascript
 
       - name: Semgrep SAST scan
         uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d  # v1
         with:
           config: >-
             p/owasp-top-ten
-            p/python
             p/secrets
 
 ##############################################################################
@@ -118,6 +120,7 @@ jobs:
         with:
           format: spdx-json
           output-file: sbom.spdx.json
+          upload-artifact: false   # Artifact name with dots is invalid; manual upload below handles it
 
       - name: Upload SBOM as artifact
         uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4
