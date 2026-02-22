@@ -64,10 +64,10 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@dd746615b3b9d728a6a37ca2045b68ca76d4841a  # v3
         with:
-          # No Python source in this demo repo — using 'javascript' scans the
-          # GitHub Actions workflow YAML files (CI/CD config security analysis).
-          # In a real Python project, add 'python' back here.
-          languages: javascript
+          # 'actions' scans GitHub Actions workflow YAML files for security issues
+          # (misuse of contexts, injection risks, overly broad permissions, etc.)
+          # In a real app repo, add your source language (e.g. python, javascript).
+          languages: actions
           queries: security-extended,security-and-quality
 
       - name: Auto-build for CodeQL
@@ -76,7 +76,7 @@ jobs:
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@dd746615b3b9d728a6a37ca2045b68ca76d4841a  # v3
         with:
-          category: /language:javascript
+          category: /language:actions
 
       - name: Semgrep SAST scan
         uses: returntocorp/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d  # v1
